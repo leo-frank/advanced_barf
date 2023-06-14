@@ -217,7 +217,7 @@ class NeuralImageFunction(torch.nn.Module):
             input_2D_dim = 2
         # point-wise RGB prediction
         self.mlp = torch.nn.ModuleList()
-        L = util.get_layer_wwwdims(opt.arch.layers)
+        L = util.get_layer_dims(opt.arch.layers)
         for li,(k_in,k_out) in enumerate(L):
             if li==0: k_in = input_2D_dim
             if li in opt.arch.skip: k_in += input_2D_dim
