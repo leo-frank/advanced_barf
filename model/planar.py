@@ -9,6 +9,7 @@ from easydict import EasyDict as edict
 import PIL
 import PIL.Image,PIL.ImageDraw
 import imageio
+import torch.nn as nn
 
 import util,util_vis
 from util import log,debug
@@ -17,6 +18,8 @@ import warp
 
 # ============================ main engine for training and evaluation ============================
 
+BOX_OFFSETS = torch.tensor([[[i,j] for i in [0, 1] for j in [0, 1]]],
+                               device='cuda')
 class Model(base.Model):
 
     def __init__(self,opt):
@@ -50,6 +53,7 @@ class Model(base.Model):
         super().setup_visualizer(opt)
         # set colors for visualization
         box_colors = ["#ff0000","#40afff","#9314ff","#ffd700","#00ff00"]
+        # box_colors = ['#1bc62c', '#5c4c9f', '#1a6b2f', '#2fe326', '#95c1f6', '#ca661a', '#31cfa5', '#cd2eac', '#b1987d', '#10a97b', '#01fc7d', '#1fcf0b', '#13d3b1', '#ad472e', '#97103c', '#776a98', '#0acb37']
         box_colors = list(map(util.colorcode_to_number,box_colors))
         self.box_colors = np.array(box_colors).astype(int)
         assert(len(self.box_colors)==opt.batch_size)
@@ -68,7 +72,7 @@ class Model(base.Model):
         # pre-generate perturbations
         self.warp_pert,var.image_pert = self.generate_warp_perturbation(opt)
         # train
-        var = util.move_to_device(var,opt.device)
+        var = util.move_to_device(var,opt.device) # var.image_pert.shape torch.Size([5, 3, 180, 180])
         loader = tqdm.trange(opt.max_iter,desc="training",leave=False)
         # visualize initial state
         var = self.graph.forward(opt,var)
@@ -97,8 +101,11 @@ class Model(base.Model):
         warp_pert_all = torch.zeros(opt.batch_size,opt.warp.dof,device=opt.device)
         trans_pert = [(0,0)]+[(x,y) for x in (-opt.warp.noise_t,opt.warp.noise_t)
                                     for y in (-opt.warp.noise_t,opt.warp.noise_t)]
+        # trans_pert = [(0,0)]+[(x,y) for x in opt.warp.noise_t
+        #                             for y in opt.warp.noise_h]
         def create_random_perturbation():
             warp_pert = torch.randn(opt.warp.dof,device=opt.device)*opt.warp.noise_h
+            warp_pert = torch.randn(opt.warp.dof,device=opt.device)*max(opt.warp.noise_h)
             warp_pert[0] += trans_pert[i][0]
             warp_pert[1] += trans_pert[i][1]
             return warp_pert
@@ -199,26 +206,135 @@ class NeuralImageFunction(torch.nn.Module):
         self.progress = torch.nn.Parameter(torch.tensor(0.)) # use Parameter so it could be checkpointed
 
     def define_network(self,opt):
-        input_2D_dim = 2+4*opt.arch.posenc.L_2D if opt.arch.posenc else 2
+        if opt.arch.posenc: # regular positional encoding
+            input_2D_dim = 2+4*opt.arch.posenc.L_2D
+        elif opt.arch.hash_multi_grid_enc: # hash encoding
+            input_2D_dim = 2+opt.arch.hash_multi_grid_enc.n_features_per_level * opt.arch.hash_multi_grid_enc.n_levels
+        else:  # no encoding
+            input_2D_dim = 2
         # point-wise RGB prediction
         self.mlp = torch.nn.ModuleList()
-        L = util.get_layer_dims(opt.arch.layers)
+        L = util.get_layer_wwwdims(opt.arch.layers)
         for li,(k_in,k_out) in enumerate(L):
             if li==0: k_in = input_2D_dim
             if li in opt.arch.skip: k_in += input_2D_dim
             linear = torch.nn.Linear(k_in,k_out)
-            if opt.barf_c2f and li==0:
+            if opt.barf_c2f and li==0: # TODO: what's this about? I ask a issue about it on github
                 # rescale first layer init (distribution was for pos.enc. but only xy is first used)
                 scale = np.sqrt(input_2D_dim/2.)
                 linear.weight.data *= scale
                 linear.bias.data *= scale
             self.mlp.append(linear)
+        if opt.arch.hash_multi_grid_enc: # additional parameters to learn for hash encoding, now you should use a smaller MLP
+            self.base_resolution = torch.tensor(opt.arch.hash_multi_grid_enc.base_resolution).to(opt.device)
+            self.finest_resolution = torch.tensor(opt.arch.hash_multi_grid_enc.finest_resolution).to(opt.device)
+            self.n_levels = torch.tensor(opt.arch.hash_multi_grid_enc.n_levels).to(opt.device)
+            self.n_features_per_level = torch.tensor(opt.arch.hash_multi_grid_enc.n_features_per_level).to(opt.device)
+            self.log2_hashmap_size = torch.tensor(opt.arch.hash_multi_grid_enc.log2_hashmap_size).to(opt.device)
+            self.b = torch.exp((torch.log(self.finest_resolution)-torch.log(self.base_resolution))/(self.n_levels-1))
+            self.embeddings = nn.ModuleList([nn.Embedding(2**self.log2_hashmap_size, \
+                                        self.n_features_per_level) for i in range(self.n_levels)])
+    def square_interp(self, x, voxel_min_vertex, voxel_max_vertex, voxel_embedds):
+        
+        x = x.view(-1, 2)
+        voxel_min_vertex = voxel_min_vertex.view(-1, 2)
+        voxel_max_vertex = voxel_max_vertex.view(-1, 2)
+        
+        '''
+        x: B x 2
+        voxel_min_vertex: B x 2
+        voxel_max_vertex: B x 2
+        voxel_embedds: B x 4 x 2
+        '''
+        # source: https://en.wikipedia.org/wiki/Trilinear_interpolation
+        weights = (x - voxel_min_vertex)/(voxel_max_vertex-voxel_min_vertex) # B x 2
 
-    def forward(self,opt,coord_2D): # [B,...,3]
-        if opt.arch.posenc:
+        # step 1
+        # 0->000, 1->001, 2->010, 3->011, 4->100, 5->101, 6->110, 7->111
+        c00 = voxel_embedds[:,0]*(1-weights[:,0][:,None]) + voxel_embedds[:,2]*weights[:,0][:,None]
+        c01 = voxel_embedds[:,1]*(1-weights[:,0][:,None]) + voxel_embedds[:,3]*weights[:,0][:,None]
+
+        # step 2
+        c = c00*(1-weights[:,1][:,None]) + c01*weights[:,1][:,None]
+
+        return c
+    def forward(self,opt,coord_2D):
+        """
+            Inputs:
+                coord_2D: torch.Size([5, 32400, 2])
+        """
+        if opt.arch.posenc: # regular positional encoding
+            log.info("using positional encoding model")
             points_enc = self.positional_encoding(opt,coord_2D,L=opt.arch.posenc.L_2D)
             points_enc = torch.cat([coord_2D,points_enc],dim=-1) # [B,...,6L+3]
-        else: points_enc = coord_2D
+        elif opt.arch.hash_multi_grid_enc:
+            
+            def hash(coords, log2_hashmap_size):  # hash encoding
+                '''
+                coords: this function can process upto 7 dim coordinates
+                log2T:  logarithm of T w.r.t 2
+                '''
+                primes = [1, 2654435761, 805459861, 3674653429, 2097192037, 1434869437, 2165219737]
+
+                xor_result = torch.zeros_like(coords)[..., 0]
+                for i in range(coords.shape[-1]):
+                    xor_result ^= coords[..., i]*primes[i]
+
+                return torch.tensor((1<<log2_hashmap_size)-1).to(xor_result.device) & xor_result    
+            
+            def get_square_vertices(xy, resolution, log2_hashmap_size, opt):
+                '''
+                Inputs:
+                    xyz: 2D coordinates of samples. (B, 2)
+                    bounding_box: min and max x,y coordinates of object bbox
+                    resolution: number of voxels per axis
+                '''
+                x1 = opt.W/max(opt.H,opt.W)
+                y1 = opt.H/max(opt.H,opt.W)
+                box_min, box_max = torch.tensor([-x1, -y1]).to(opt.device), torch.tensor([x1, y1]).to(opt.device)
+
+                keep_mask = xy ==torch.max(torch.min(xy , box_max), box_min)
+                if not torch.all(xy  <= box_max) or not torch.all(xy  >= box_min):
+                    print("ALERT: some points are outside bounding box. Clipping them!")
+                    xy  = torch.clamp(xy , min=box_min, max=box_max)
+
+                grid_size = (box_max-box_min)/resolution
+
+                bottom_left_idx = torch.floor((xy-box_min)/grid_size).int()
+                voxel_min_vertex = bottom_left_idx*grid_size + box_min
+                voxel_max_vertex = voxel_min_vertex + torch.tensor([1.0,1.0]).to(opt.device)*grid_size
+
+                voxel_indices = bottom_left_idx.view(-1, 2).unsqueeze(1) + BOX_OFFSETS
+                hashed_voxel_indices = hash(voxel_indices, log2_hashmap_size)
+
+                return voxel_min_vertex, voxel_max_vertex, hashed_voxel_indices, keep_mask   
+ 
+            log.info("using hashgrid model")
+            
+            x_embedded_all = []
+            for i in range(self.n_levels):
+                resolution = torch.floor(self.base_resolution * self.b**i)
+                voxel_min_vertex, voxel_max_vertex, hashed_voxel_indices, keep_mask = get_square_vertices(coord_2D, resolution, self.log2_hashmap_size, opt)
+                voxel_embedds = self.embeddings[i](hashed_voxel_indices) # should get 4 items
+                x_embedded = self.square_interp(coord_2D, voxel_min_vertex, voxel_max_vertex, voxel_embedds)
+                x_embedded_all.append(x_embedded)
+            points_enc = torch.cat(x_embedded_all, dim=-1)
+            ### !!!! ###
+            if opt.barf_c2f is not None:
+                # set weights for different frequency bands
+                start,end = opt.barf_c2f
+                alpha = (self.progress.data-start)/(end-start)*self.n_levels
+                k = torch.arange(self.n_levels,dtype=torch.float32,device=opt.device)
+                weight = (1-(alpha-k).clamp_(min=0,max=1).mul_(np.pi).cos_())/2
+                print(weight)
+                # apply weights
+                shape = points_enc.shape
+                points_enc = (points_enc.view(-1,self.n_levels)*weight).view(*shape)
+                
+            points_enc = torch.cat([coord_2D.view(-1, 2),points_enc],dim=-1) # [B,..., f*l+2]
+        else: 
+            log.info("using no encoding")
+            points_enc = coord_2D
         feat = points_enc
         # extract implicit features
         for li,layer in enumerate(self.mlp):
@@ -227,7 +343,7 @@ class NeuralImageFunction(torch.nn.Module):
             if li!=len(self.mlp)-1:
                 feat = torch_F.relu(feat)
         rgb = feat.sigmoid_() # [B,...,3]
-        return rgb
+        return rgb.view(coord_2D.shape[0], -1,3)
 
     def positional_encoding(self,opt,input,L): # [B,...,N]
         shape = input.shape
@@ -238,6 +354,7 @@ class NeuralImageFunction(torch.nn.Module):
         input_enc = input_enc.view(*shape[:-1],-1) # [B,...,2NL]
         # coarse-to-fine: smoothly mask positional encoding for BARF
         if opt.barf_c2f is not None:
+            log.info("regular positional encoding (with barf)")
             # set weights for different frequency bands
             start,end = opt.barf_c2f
             alpha = (self.progress.data-start)/(end-start)*L
