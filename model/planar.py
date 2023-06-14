@@ -105,7 +105,7 @@ class Model(base.Model):
         #                             for y in opt.warp.noise_h]
         def create_random_perturbation():
             warp_pert = torch.randn(opt.warp.dof,device=opt.device)*opt.warp.noise_h
-            warp_pert = torch.randn(opt.warp.dof,device=opt.device)*max(opt.warp.noise_h)
+            # warp_pert = torch.randn(opt.warp.dof,device=opt.device)*max(opt.warp.noise_h)
             warp_pert[0] += trans_pert[i][0]
             warp_pert[1] += trans_pert[i][1]
             return warp_pert
