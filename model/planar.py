@@ -267,7 +267,7 @@ class NeuralImageFunction(torch.nn.Module):
                 coord_2D: torch.Size([5, 32400, 2])
         """
         if opt.arch.posenc: # regular positional encoding
-            log.info("using positional encoding model")
+            # log.info("using positional encoding model")
             points_enc = self.positional_encoding(opt,coord_2D,L=opt.arch.posenc.L_2D)
             points_enc = torch.cat([coord_2D,points_enc],dim=-1) # [B,...,6L+3]
         elif opt.arch.hash_multi_grid_enc:
@@ -312,7 +312,7 @@ class NeuralImageFunction(torch.nn.Module):
 
                 return voxel_min_vertex, voxel_max_vertex, hashed_voxel_indices, keep_mask   
  
-            log.info("using hashgrid model")
+            # log.info("using hashgrid model")
             
             x_embedded_all = []
             for i in range(self.n_levels):
@@ -329,14 +329,14 @@ class NeuralImageFunction(torch.nn.Module):
                 alpha = (self.progress.data-start)/(end-start)*self.n_levels
                 k = torch.arange(self.n_levels,dtype=torch.float32,device=opt.device)
                 weight = (1-(alpha-k).clamp_(min=0,max=1).mul_(np.pi).cos_())/2
-                print(weight)
+                # print(weight)
                 # apply weights
                 shape = points_enc.shape
                 points_enc = (points_enc.view(-1,self.n_levels)*weight).view(*shape)
                 
             points_enc = torch.cat([coord_2D.view(-1, 2),points_enc],dim=-1) # [B,..., f*l+2]
         else: 
-            log.info("using no encoding")
+            # log.info("using no encoding")
             points_enc = coord_2D
         feat = points_enc
         # extract implicit features
