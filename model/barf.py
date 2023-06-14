@@ -26,14 +26,15 @@ class Model(nerf.Model):
         if opt.camera.noise:
             # pre-generate synthetic pose perturbation
             se3_noise = torch.randn(len(self.train_data),6,device=opt.device)*opt.camera.noise
-            self.graph.pose_noise = camera.lie.se3_to_SE3(se3_noise)
-        self.graph.se3_refine = torch.nn.Embedding(len(self.train_data),6).to(opt.device)
+            self.graph.pose_noise = camera.lie.se3_to_SE3(se3_noise) # 生成我们即将施加的位姿扰动 (N_image, (4*4))
+        # 这是位姿网路 model，每一个embedding里面代表的是我们想要学习的位姿扰动，最终学习的目标就是我们之前生成的噪音的逆矩阵（注意是逆矩阵）
+        self.graph.se3_refine = torch.nn.Embedding(len(self.train_data),6).to(opt.device) 
         torch.nn.init.zeros_(self.graph.se3_refine.weight)
 
     def setup_optimizer(self,opt):
         super().setup_optimizer(opt)
         optimizer = getattr(torch.optim,opt.optim.algo)
-        self.optim_pose = optimizer([dict(params=self.graph.se3_refine.parameters(),lr=opt.optim.lr_pose)])
+        self.optim_pose = optimizer([dict(params=self.graph.se3_refine.parameters(),lr=opt.optim.lr_pose)]) # 这是位姿网路的优化器
         # set up scheduler
         if opt.optim.sched_pose:
             scheduler = getattr(torch.optim.lr_scheduler,opt.optim.sched_pose.type)
@@ -54,7 +55,7 @@ class Model(nerf.Model):
         if opt.optim.warmup_pose:
             self.optim_pose.param_groups[0]["lr"] = self.optim_pose.param_groups[0]["lr_orig"] # reset learning rate
         if opt.optim.sched_pose: self.sched_pose.step()
-        self.graph.nerf.progress.data.fill_(self.it/opt.max_iter)
+        self.graph.nerf.progress.data.fill_(self.it/opt.max_iter) # control barf progress
         if opt.nerf.fine_sampling:
             self.graph.nerf_fine.progress.data.fill_(self.it/opt.max_iter)
         return loss
@@ -65,7 +66,7 @@ class Model(nerf.Model):
         _,self.graph.sim3 = self.prealign_cameras(opt,pose,pose_GT)
         super().validate(opt,ep=ep)
 
-    @torch.no_grad()
+    @torch.no_grad() # OK
     def log_scalars(self,opt,var,loss,metric=None,step=0,split="train"):
         super().log_scalars(opt,var,loss,metric=metric,step=step,split=split)
         if split=="train":
@@ -86,10 +87,17 @@ class Model(nerf.Model):
         if opt.visdom:
             if split=="val":
                 pose,pose_GT = self.get_all_training_poses(opt)
-                util_vis.vis_cameras(opt,self.vis,step=step,poses=[pose,pose_GT])
+                ### 可视化
+                util_vis.vis_cameras(opt,self.vis,step=step,poses=[pose,pose_GT]) # 可视化估计的相机位姿和真实的相机位姿的区别
 
     @torch.no_grad()
     def get_all_training_poses(self,opt):
+        """
+        Outputs:
+            pose: 学习到的位姿 * noise位姿 * 真实的位姿
+            pose_GT: 真实的位姿
+        我们希望两者是一致的
+        """
         # get ground-truth (canonical) camera poses
         pose_GT = self.train_data.get_all_camera_poses(opt).to(opt.device)
         # add synthetic pose perturbation to all training data
@@ -105,6 +113,11 @@ class Model(nerf.Model):
 
     @torch.no_grad()
     def prealign_cameras(self,opt,pose,pose_GT):
+        """
+        Output:
+            返回的是第一个结果是，pose根据pose_GT对齐后的结果
+            sim3 之间的对齐关系 pose * sim3 = pose_return
+        """
         # compute 3D similarity transform via Procrustes analysis
         center = torch.zeros(1,1,3,device=opt.device)
         center_pred = camera.cam2world(center,pose)[:,0] # [N,3]
@@ -123,6 +136,11 @@ class Model(nerf.Model):
 
     @torch.no_grad()
     def evaluate_camera_alignment(self,opt,pose_aligned,pose_GT):
+        """
+            输入对齐后的pose和真实的pose
+            返回error（R, T两部分）
+        
+        """
         # measure errors in rotation and translation
         R_aligned,t_aligned = pose_aligned.split([3,1],dim=-1)
         R_GT,t_GT = pose_GT.split([3,1],dim=-1)
@@ -218,11 +236,11 @@ class Graph(nerf.Graph):
         if mode=="train":
             # add the pre-generated pose perturbations
             if opt.data.dataset=="blender":
-                if opt.camera.noise:
+                if opt.camera.noise: # 添加noise， 位姿从加了noise的位姿开始学习
                     var.pose_noise = self.pose_noise[var.idx]
-                    pose = camera.pose.compose([var.pose_noise,var.pose])
+                    pose = camera.pose.compose([var.pose_noise,var.pose]) # 将noise和原有位姿组合起来
                 else: pose = var.pose
-            else: pose = self.pose_eye
+            else: pose = self.pose_eye # 位姿从单位矩阵开始学习 LLFFforward那种场景下就需要
             # add learnable pose correction
             var.se3_refine = self.se3_refine.weight[var.idx]
             pose_refine = camera.lie.se3_to_SE3(var.se3_refine)
