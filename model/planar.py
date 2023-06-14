@@ -207,10 +207,13 @@ class NeuralImageFunction(torch.nn.Module):
 
     def define_network(self,opt):
         if opt.arch.posenc: # regular positional encoding
+            log.info("using regular positional encoding")
             input_2D_dim = 2+4*opt.arch.posenc.L_2D
         elif opt.arch.hash_multi_grid_enc: # hash encoding
+            log.info("using hash encoding")
             input_2D_dim = 2+opt.arch.hash_multi_grid_enc.n_features_per_level * opt.arch.hash_multi_grid_enc.n_levels
         else:  # no encoding
+            log.info("using no encoding")
             input_2D_dim = 2
         # point-wise RGB prediction
         self.mlp = torch.nn.ModuleList()
