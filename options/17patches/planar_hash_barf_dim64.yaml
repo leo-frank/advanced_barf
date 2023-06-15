@@ -1,0 +1,4 @@
+_parent_: options/17patches/planar_hash_barf.yaml
+
+arch:                                                       # architectural options
+    layers: [null,64,64,64,64,3]                        # hidden layers for MLP

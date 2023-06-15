@@ -52,8 +52,10 @@ class Model(base.Model):
     def setup_visualizer(self,opt):
         super().setup_visualizer(opt)
         # set colors for visualization
+        # 5 Colors
         box_colors = ["#ff0000","#40afff","#9314ff","#ffd700","#00ff00"]
-        # box_colors = ['#1bc62c', '#5c4c9f', '#1a6b2f', '#2fe326', '#95c1f6', '#ca661a', '#31cfa5', '#cd2eac', '#b1987d', '#10a97b', '#01fc7d', '#1fcf0b', '#13d3b1', '#ad472e', '#97103c', '#776a98', '#0acb37']
+        # 17 Colors
+        box_colors = ['#1bc62c', '#5c4c9f', '#1a6b2f', '#2fe326', '#95c1f6', '#ca661a', '#31cfa5', '#cd2eac', '#b1987d', '#10a97b', '#01fc7d', '#1fcf0b', '#13d3b1', '#ad472e', '#97103c', '#776a98', '#0acb37']
         box_colors = list(map(util.colorcode_to_number,box_colors))
         self.box_colors = np.array(box_colors).astype(int)
         assert(len(self.box_colors)==opt.batch_size)
@@ -99,8 +101,12 @@ class Model(base.Model):
     def generate_warp_perturbation(self,opt):
         # pre-generate perturbations (translational noise + homography noise)
         warp_pert_all = torch.zeros(opt.batch_size,opt.warp.dof,device=opt.device)
+        # 4 Patches
         trans_pert = [(0,0)]+[(x,y) for x in (-opt.warp.noise_t,opt.warp.noise_t)
                                     for y in (-opt.warp.noise_t,opt.warp.noise_t)]
+        # 17 Patches
+        trans_pert = [(0,0)]+[(x,y) for x in (-opt.warp.noise_t, -opt.warp.noise_t/2, opt.warp.noise_t/2, opt.warp.noise_t)
+                                    for y in (-opt.warp.noise_t, -opt.warp.noise_t/2, opt.warp.noise_t/2, opt.warp.noise_t)]
         # trans_pert = [(0,0)]+[(x,y) for x in opt.warp.noise_t
         #                             for y in opt.warp.noise_h]
         def create_random_perturbation():
